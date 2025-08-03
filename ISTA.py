@@ -2,22 +2,23 @@ import asyncio
 import subprocess
 import sys
 from ollama import chat
-from prompt_toolkit.shortcuts import PromptSession
-from prompt_toolkit.styles import Style as PromptStyle
 from web import *
 import re
 import threading
-import keyboard  # Windows/Linux only, not Mac without sudo
+import keyboard
+import getpass
+import platform
+import shlex
 
-# Remove colorama imports and init
-session = PromptSession()
+username = getpass.getuser()
 
 is_generating = False
 abort_generation = False
 do_tool_auth = True
+num_agents = 0
 model = "huihui_ai/qwen3-abliterated:8b-v2-q4_K_M"
 
-# Define Windows CMD color codes
+# Colors :3
 class Colors:
     PROMPT = "\033[94m"    # Blue
     INFO = "\033[92m"      # Green
@@ -28,13 +29,16 @@ class Colors:
 
 # Enable Windows Console Virtual Terminal Sequences
 def enable_virtual_terminal():
-    import ctypes
-    kernel32 = ctypes.windll.kernel32
-    handle = kernel32.GetStdHandle(-11)  # STD_OUTPUT_HANDLE
-    mode = ctypes.c_ulong()
-    kernel32.GetConsoleMode(handle, ctypes.byref(mode))
-    mode.value |= 0x0004  # ENABLE_VIRTUAL_TERMINAL_PROCESSING
-    kernel32.SetConsoleMode(handle, mode)
+    if platform.system() == 'Windows':
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.GetStdHandle(-11)
+        mode = ctypes.c_ulong()
+        kernel32.GetConsoleMode(handle, ctypes.byref(mode))
+        mode.value |= 0x0004
+        kernel32.SetConsoleMode(handle, mode)
+    # On Linux/Unix, ANSI codes work by default
+    pass
 
 def listen_for_abort():
     global abort_generation
@@ -103,11 +107,12 @@ tools = [
     }
 ]
 
-SYS_MSG = """
+SYS_MSG = f"""
 You are ISTA, short for Integrated Smart Terminal Assistant, a smart terminal assistant designed to help users with various tasks, including executing commands, providing information, and assisting with programming tasks. 
 You can execute shell commands and provide responses in a conversational manner.
 You can also search the web for information and provide relevant results to the user.
 You are a agentic AI. Until you send a message without a tool call, you can execute tools one after another.
+You are chatting with a user named "{username}" (system name, might not be accurate).
 """
 
 async def llm_stream(messages, tools=None):
@@ -115,7 +120,18 @@ async def llm_stream(messages, tools=None):
     Streams LLM responses and collects any tool calls.
     Yields (current_response, tool_calls).
     """
-    stream = chat(model=model, messages=messages, tools=tools, stream=True)
+    stream = chat(
+        model=model, 
+        messages=messages, 
+        tools=tools, 
+        stream=True,
+        options = {
+            "temperature": 0.6,
+            "top_p": 0.95,
+            "presence_penalty": 0.0,
+            "frequency_penalty": 0.15
+        }    
+    )
     aggregated = ""
     calls = []
 
@@ -178,18 +194,42 @@ async def display_stream(stream_gen):
     return partial, calls
 
 async def main():
-    global model
+    global model, tools
+    if num_agents > 0:
+        # TODO!!!!!
+        tools += [
+            {
+                "type": "function",
+                "function": {
+                    "name": "deploy_agent",
+                    "description": "Need to do stuff in parralel? Agents got you! Just make a prompt and you can deploy an agent that will do that task autonomusly!",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "agents": {"type": "string", "description": "A json of all agents, eg. {'1': 'prompt1', '2': 'prompt2'}. The number is the agent number, required to keep track of the agents. You can deploy up to "+str(num_agents)+" agents."}
+                        },
+                        "required": ["agents"],
+                        "additionalProperties": False
+                    },
+                    "strict": True
+                }
+            }
+        ]
+
     print(f"{Colors.INFO}Welcome to the Integrated Smart Terminal Assistant (ISTA)!{Colors.RESET}")
+    print(f"{Colors.INFO}Type '?' or 'help' for a list of available user commands.{Colors.RESET}")
     history = [{"role": "system", "content": SYS_MSG}]
     while True:
-        user_input = await session.prompt_async(
-            [('class:prompt', '>>> ')],
-            style=PromptStyle.from_dict({
-                'prompt': 'bold ansiblue',
-                '': 'ansiwhite',
-            }),
-            placeholder='Send a message (? for help)'
-        )
+        user_input = input(f"{Colors.PROMPT}>>> {Colors.RESET}")
+
+        if user_input == '"""':
+            final_input = ""
+            while True:
+                user_input = input(f"{Colors.PROMPT}... {Colors.RESET}")
+                if user_input == '"""':
+                    break
+                final_input += user_input + "\n"
+            user_input = final_input
 
         if not user_input:
             continue
@@ -213,7 +253,6 @@ async def main():
             continue
         
         if user_input.strip() in ["tools", "t"]:
-            global tools
             tools = None if tools else tools
             print(f"{Colors.WARNING}Tools {'disabled' if tools is None else 'enabled'}. AI will {'not ' if tools is None else ''}execute any tools.{Colors.RESET}")
 
@@ -278,7 +317,14 @@ async def main():
 
                         if choice.strip().lower() == 'y':
                             print(f"{Colors.INFO}Executing: {cmd}{Colors.RESET}")
-                            result = subprocess.run(cmd, text=True, shell=True,
+                            if platform.system() == 'Windows':
+                                # Windows-style command execution
+                                result = subprocess.run(cmd, text=True, shell=True,
+                                                    capture_output=True, input=inpt, encoding="utf-8", errors="replace")
+                            else:
+                                # Unix-style command execution
+                                cmd_args = shlex.split(cmd)
+                                result = subprocess.run(cmd_args, text=True,
                                                     capture_output=True, input=inpt, encoding="utf-8", errors="replace")
                             output = (result.stdout or result.stderr).strip()
                             history.append({
@@ -321,6 +367,16 @@ async def main():
                             "name": name,
                             "content": json.dumps({"result": "Searched web.", "query": content, "num_results": num_sites, "result": web_search_result})
                         })
+
+                    if name == "deploy_agent":
+                        agent = args["agent"]
+                        print(f"{Colors.INFO}Deploying agent '{agent}'...{Colors.RESET}")
+                        # TODO
+                        history.append({
+                            "role": "tool",
+                            "name": name,
+                            "content": json.dumps({"result": "Deployed agent.", "agent": agent})
+                        })
         
         history.append({"role": "assistant", "content": partial})
 
@@ -341,6 +397,12 @@ if __name__ == '__main__':
     if '--disable-auth' in subprocess.list2cmdline(sys.argv):
         print(f"{Colors.WARNING}Authentication disabled. The AI can now execute tools without authentication.{Colors.RESET}")
         do_tool_auth = False
+
+    if '--agents' in subprocess.list2cmdline(sys.argv):
+        # DO NOT USE, NOT FINISHED YET.
+        # TODO
+        num_agents = int(subprocess.list2cmdline(sys.argv)[subprocess.list2cmdline(sys.argv).index('--agents') + 1])
+        print(f"{Colors.WARNING}Allowing ai to deploy {num_agents} agents.{Colors.RESET}")
 
     try:
         asyncio.run(main())
