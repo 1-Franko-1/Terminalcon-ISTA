@@ -222,14 +222,18 @@ async def main():
     while True:
         user_input = input(f"{Colors.PROMPT}>>> {Colors.RESET}")
 
-        if user_input == '"""':
-            final_input = ""
-            while True:
-                user_input = input(f"{Colors.PROMPT}... {Colors.RESET}")
-                if user_input == '"""':
-                    break
-                final_input += user_input + "\n"
-            user_input = final_input
+        if user_input.strip().startswith('"""'):
+            if user_input.strip().endswith('"""') and len(user_input.strip()) > 3:
+                user_input = user_input.strip()[3:-3].strip()
+            else:
+                final_input = user_input.lstrip()[3:] + "\n"
+                while True:
+                    user_input = input(f"{Colors.PROMPT}... {Colors.RESET}")
+                    if '"""' in user_input:
+                        final_input += user_input.split('"""')[0]
+                        break
+                    final_input += user_input + "\n"
+                user_input = final_input.strip()
 
         if not user_input:
             continue
