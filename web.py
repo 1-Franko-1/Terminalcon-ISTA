@@ -1,14 +1,19 @@
 # -- file: web.py --
 # -- libraries --
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, XMLParsedAsHTMLWarning
 import requests
 from urllib.parse import urlparse, urljoin
 from urllib.robotparser import RobotFileParser
 from requests.exceptions import RequestException
 from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled, NoTranscriptFound
 from urllib.parse import urlparse, parse_qs
+from tqdm import tqdm
 import json
 import os
+import warnings
+
+# Filter XML parsing warning
+warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
 
 google_api_key = os.getenv("GOOGLE_KEY")
 google_cx = os.getenv("GOOGLE_CX")
@@ -335,9 +340,13 @@ async def web_search(tool_input: str, num_sites: int) -> str:
 
         if 'http://' in tool_input or 'https://' in tool_input:
             # Directly crawl a provided URL
-            crawler = AdvCrawler(tool_input)
-            scraped_result = crawler.crawl()
-            search_results.append({"link": tool_input, "scraped_content": scraped_result})
+            with tqdm(total=1, desc="Crawling URL", unit="site", 
+                     bar_format="\033[94m{desc}\033[0m: {percentage:3.0f}%|"
+                     "\033[92m{bar}\033[0m| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]") as pbar:
+                crawler = AdvCrawler(tool_input)
+                scraped_result = crawler.crawl()
+                search_results.append({"link": tool_input, "scraped_content": scraped_result})
+                pbar.update(1)
         else:
             max_retries = 3
             for attempt in range(max_retries):
@@ -355,18 +364,22 @@ async def web_search(tool_input: str, num_sites: int) -> str:
                 items = response_json.get("items", [])
 
                 if items:
-                    for item in items[:num_sites]:
-                        link = item.get("link")
-                        crawler = AdvCrawler(link)
-                        search_results.append({
-                            "title": item.get("title"),
-                            "link": link,
-                            "snippet": item.get("snippet"),
-                            "scraped_content": crawler.crawl()
-                        })
+                    with tqdm(total=min(num_sites, len(items)), desc="Crawling search results", unit="site",
+                            bar_format="\033[94m{desc}\033[0m: {percentage:3.0f}%|"
+                            "\033[92m{bar}\033[0m| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]") as pbar:
+                        for item in items[:num_sites]:
+                            link = item.get("link")
+                            crawler = AdvCrawler(link)
+                            search_results.append({
+                                "title": item.get("title"),
+                                "link": link,
+                                "snippet": item.get("snippet"),
+                                "scraped_content": crawler.crawl()
+                            })
+                            pbar.update(1)
                     break
                 else:
-                    print("No results found, retrying...")
+                    print(f"No results found, attempt {attempt + 1} of {max_retries}...")
 
             if not search_results:
                 return json.dumps({"error": "No search results after 3 attempts."}, indent=4)
